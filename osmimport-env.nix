@@ -1,5 +1,6 @@
 let
   pkgs = import <nixpkgs> {};
+  allowBroken = true;
   haskellEnv = pkgs.haskellPackages_ghc763.ghcWithPackages (self : (
     [
       self.protocolBuffers
