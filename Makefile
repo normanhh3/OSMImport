@@ -27,8 +27,8 @@ cabal-build: tags
 cabal-install: tags
 	cabal install
 
-cabal-prerequisites-init:
-	cabal install hello happy alex hprotoc hlint hoogle ghc-mod HsColour hasktags hdevtools stylish-haskell haskell-docs
+# cabal-prerequisites-init:
+# 	cabal install hello happy alex hprotoc hlint hoogle ghc-mod HsColour hasktags hdevtools stylish-haskell haskell-docs
 
 cabal-sandbox-init:
 	cabal sandbox init --sandbox $(CABAL_SANDBOX)
