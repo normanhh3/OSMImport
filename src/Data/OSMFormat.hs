@@ -76,7 +76,7 @@ module Data.OSMFormat where
   data PrimitiveGroup = PrimitiveGroup
     { pg_nodes :: Repeated 1 (Message Node)
     , pg_dense :: Optional 2 (Message DenseNodes)
---    , pg_ways :: Repeated 3 (Message Way)
+    , pg_ways :: Repeated 3 (Message Way)
 --    , pg_relations :: Repeated 4 (Message Relation)
 --    , pg_change_sets :: Repeated 5 (Message ChangeSet)
     } deriving (Generic, Show)
@@ -122,18 +122,18 @@ module Data.OSMFormat where
 -- Unused
 
 -- Doesn't decompile properly, the uint32 type mostly fails with an error
---  data Way = Way
---    { way_id :: Required 1 (Value Int64)
---    -- , way_keys :: Packed 2 (Value Int32) -- [packed = true];
---    -- , way_vals :: Packed 3 (Value Int32) -- [packed = true];
-----     , way_keys :: Packed 2 (Value (Fixed Word32)) -- [packed = true];
-----     , way_vals :: Packed 3 (Value (Fixed Word32)) -- [packed = true];
---     , way_info :: Optional 4 (Message Info)
---    , way_refs :: Packed 8 (Value (Signed Int64)) -- [packed = true];  // DELTA coded
---    } deriving (Generic, Show)
---
---  instance Encode Way
---  instance Decode Way
+  data Way = Way
+    { way_id :: Required 1 (Value Int64)
+    , way_keys :: Packed 2 (Value Int32) -- [packed = true];
+    , way_vals :: Packed 3 (Value Int32) -- [packed = true];
+    , way_info :: Optional 4 (Message Info)
+    , way_refs :: Packed 8 (Value (Signed Int64)) -- [packed = true];  // DELTA coded
+    --     , way_keys :: Packed 2 (Value (Fixed Word32)) -- [packed = true];
+    --     , way_vals :: Packed 3 (Value (Fixed Word32)) -- [packed = true];
+  } deriving (Generic, Show)
+
+  instance Encode Way
+  instance Decode Way
 --
 --  data Relation = Relation 
 --    { relation_id :: Required 1 (Value Int64)

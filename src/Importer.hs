@@ -3,7 +3,7 @@
 module Importer where
 
 import Control.Concurrent (forkIO, newEmptyMVar, takeMVar, putMVar)
-import Control.Monad (forever)
+import Control.Monad (forever, when)
 import Data.Binary.Get (Get, getWord32be, getLazyByteString, runGet, bytesRead)
 import Codec.Compression.Zlib (decompress)
 import System.Exit (exitFailure)
@@ -16,9 +16,10 @@ import Data.ProtocolBuffers (decodeMessage, getField)
 import Common(nano,deltaDecode,calculateDegrees)
 import qualified Data.Node as N
 import qualified Data.Tag as T
+import qualified Data.Way as W
 import qualified Database as MDB (saveNodes,saveWays,saveRelation)
 import Data.OSMFormat
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, isJust)
 import qualified Data.Serialize as S (runGetLazy, runGet)
 import qualified Data.Text as TXT (unpack) 
 import qualified Data.ByteString.Char8 as BCE (unpack)
@@ -37,7 +38,8 @@ getChunks limit location chunks
     bytesRead' <- bytesRead
     let location' = fromIntegral bytesRead' 
     getChunks limit location' ((Chunk blobHeader blob) : chunks)
- | otherwise = return $ reverse chunks
+  | otherwise = return $ reverse chunks
+
 
 startImport :: String -> String -> String -> IO ()
 startImport dbconnection dbname filename = do
@@ -71,37 +73,35 @@ performImport fileName dbNodecommand = do
             putStrLn $ "Chunk : [" ++ (show count) ++ "] Header data"
             processData xs (count + 1)
           "OSMData" -> do
-            let Right primitiveBlock = S.runGetLazy decodeMessage =<< Right blobUncompressed :: Either String PrimitiveBlock
-            -- print primitiveBlock
-            let st = map BCE.unpack . getField $ st_bytes (getField $ pb_stringtable primitiveBlock)
-            let gran = fromIntegral . fromJust . getField $ pb_granularity primitiveBlock 
-            let pg = getField $ pb_primitivegroup primitiveBlock 
-            -- print pg
-            entryCount <- primitiveGroups pg st gran 0
-            putStrLn $ "Chunk : [" ++ (show count) ++ "] Entries parsed = [" ++ (show entryCount) ++ "]"
-            -- putStrLn $ "Chunk : [" ++ (show count) ++ "] Entries parsed = [" ++ (show 0) ++ "]"
+            let primitiveBlock = S.runGetLazy decodeMessage =<< Right blobUncompressed :: Either String PrimitiveBlock
+            case (primitiveBlock) of
+              Right pblock -> do 
+                          let st = map BCE.unpack . getField $ st_bytes (getField $ pb_stringtable pblock)
+                          let gran = fromIntegral . fromJust . getField $ pb_granularity pblock 
+                          let pg = getField $ pb_primitivegroup pblock 
+                          _ <- primitiveGroups pg st gran
+                          putStrLn $ "Chunk : [" ++ (show count) ++ "] OSMData"
+              Left errorString -> print errorString
             processData xs (count + 1)
 
-
       -- Primitive Groups
-      primitiveGroups [] _ _ count = return count
-      primitiveGroups (x:xs) st gran count = do 
-        let pgNodes = fromJust . getField $ pg_dense x
-        -- print pgNodes
-        -- let pgWays = F.toList $ getVal x ways
+      primitiveGroups [] _ _ = return ()
+      primitiveGroups (x:xs) st gran = do
+        let pgNodes =  getField $ pg_dense x
+        when (isJust pgNodes) (dbNodecommand . denseNodes $ fromJust pgNodes)
+        primitiveGroups xs st gran
+      
+      -- let pgWays = getField $ pg_ways x
       --   let pgRelations = F.toList $ getVal x relations
-        let impNodes = denseNodes pgNodes
-
-      --   let impWays = parseImpWays pgWays
+        
+        -- let impWays = parseImpWays pgWays
       --   let impRelations = parseImpRelations pgRelations
-
-        dbNodecommand impNodes
-      --   dbWaycommand impWays
-      --   dbRelationcommand impRelations
+        -- dbWaycommand impWays
+        -- dbRelationcommand impRelations
 
         -- let newCount = count + (length impNodes) + (length impWays) + (length impRelations)
-        let newCount = count + (length impNodes)
-        primitiveGroups xs st gran newCount
+        -- let newCount = count + (length impNodes)
+        -- primitiveGroups xs st gran 1
         where
           denseNodes :: DenseNodes -> [N.ImportNode]
           denseNodes d = do 
@@ -120,8 +120,6 @@ performImport fileName dbNodecommand = do
                 let sids = map fromIntegral (getField $ dense_info_user_sid info) 
                 buildNodeData ids latitudes longitudes keyvals versions timestamps changesets uids sids
               Nothing -> buildNodeData ids latitudes longitudes keyvals [] [] [] [] []
-
-            -- buildNodeData ids latitudes longitudes keyvals versions timestamps changesets uids sids
 
           buildNodeData :: [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [N.ImportNode]
           buildNodeData ids lat lon keyvals versions timestamps changesets uids sids = do
@@ -170,6 +168,29 @@ performImport fileName dbNodecommand = do
             T.ImportTag (st !! x) (st !! y) : lookupKeyVals xs ys
 
 
+          -- parseImpWays :: [Way] -> [W.ImportWay]
+          -- parseImpWays [] = []
+          -- parseImpWays (x:xs) = do
+          --   buildImpWay x : parseImpWays xs
+          --   where
+          --     buildImpWay :: Way -> W.ImportWay
+          --     buildImpWay pgWay = do
+          --       let id = fromIntegral $ getField $ way_id pgWay
+          --       let keys = map fromIntegral $ getField $ way_keys pgWay
+          --       let vals = map fromIntegral $ getField $ way_vals pgWay
+          --       let refs = map fromIntegral $ getField $ way_refs pgWay
+          --       let info = fromJust $ getField $ way_info pgWay
+          --       let deltaRefs = deltaDecode refs 0
+          --       W.ImportWay { W._id=id
+          --                   , W.tags=(lookupKeyVals keys vals)
+          --                   , W.version=fromIntegral . fromJust . getField $ info_version info
+          --                   , W.timestamp=fromIntegral . fromJust . getField $ info_timestamp info
+          --                   , W.changeset=fromIntegral . fromJust . getField $ info_changeset info
+          --                   , W.uid=fromIntegral . fromJust . getField $ info_uid info
+          --                   , W.user=(st !! (fromIntegral . fromJust . getField $ info_user_sid info :: Int))
+          --                   , W.nodes=deltaRefs}
+
+
 
       --     parseImpRelations :: [Relation] -> [R.ImportRelation]
       --     parseImpRelations [] = []
@@ -197,27 +218,6 @@ performImport fileName dbNodecommand = do
       --               buildRelationTags [] [] = []
       --               buildRelationTags (x:xs) (y:ys) = ImportTag x (show y) : buildRelationTags xs ys
 
-      --     parseImpWays :: [Way] -> [W.ImportWay]
-      --     parseImpWays [] = []
-      --     parseImpWays (x:xs) = do
-      --       buildImpWay x : parseImpWays xs
-      --       where
-      --         buildImpWay :: Way -> W.ImportWay
-      --         buildImpWay pgWay = do
-      --           let id = fromIntegral (getVal pgWay OSM.OSMFormat.Way.id)
-      --           let keys = map fromIntegral $ F.toList (getVal pgWay OSM.OSMFormat.Way.keys) 
-      --           let vals = map fromIntegral $ F.toList (getVal pgWay OSM.OSMFormat.Way.vals)
-      --           let refs = map fromIntegral $ F.toList (getVal pgWay OSM.OSMFormat.Way.refs)
-      --           let info = (getVal pgWay OSM.OSMFormat.Way.info)
-      --           let deltaRefs = deltaDecode refs 0
-      --           W.ImportWay { W._id=id
-      --                       , W.tags=(lookupKeyVals keys vals)
-      --                       , W.version=fromIntegral (getVal info OSM.OSMFormat.Info.version)
-      --                       , W.timestamp=fromIntegral (getVal info OSM.OSMFormat.Info.timestamp)
-      --                       , W.changeset=fromIntegral (getVal info OSM.OSMFormat.Info.changeset)
-      --                       , W.uid=fromIntegral (getVal info OSM.OSMFormat.Info.uid)
-      --                       , W.user=(st !! (fromIntegral (getVal info OSM.OSMFormat.Info.user_sid) :: Int))
-      --                       , W.nodes=deltaRefs}
 
 
 showUsage :: IO ()
