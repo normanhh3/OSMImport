@@ -15,11 +15,12 @@ import qualified Data.ByteString.Lazy.UTF8 as U (toString)
 import Data.ProtocolBuffers (decodeMessage, getField)
 import Common(nano,deltaDecode,calculateDegrees)
 import qualified Data.Node as N
+import qualified Data.Tag as T
 import qualified Database as MDB (saveNodes,saveWays,saveRelation)
 import Data.OSMFormat
 import Data.Maybe (fromJust)
 import qualified Data.Serialize as S (runGetLazy, runGet)
-import qualified Data.Text as T (unpack) 
+import qualified Data.Text as TXT (unpack) 
 import qualified Data.ByteString.Char8 as BCE (unpack)
 
 
@@ -58,7 +59,7 @@ performImport fileName dbNodecommand = do
       processData (x:xs) count = do
         let blobUncompressed = decompress $ BL.fromStrict . fromJust . getField $ b_zlib_data (blob x)
         let btype = getField $ bh_type (blob_header x)
-        case (T.unpack btype) of
+        case (TXT.unpack btype) of
           "OSMHeader" -> do
             let Right headerBlock = S.runGetLazy decodeMessage =<< Right blobUncompressed :: Either String HeaderBlock
             let b = fromJust . getField $ hb_bbox headerBlock 
@@ -76,29 +77,100 @@ performImport fileName dbNodecommand = do
             let gran = fromIntegral . fromJust . getField $ pb_granularity primitiveBlock 
             let pg = getField $ pb_primitivegroup primitiveBlock 
             -- print pg
-            -- entryCount <- primitiveGroups pg st gran 0
-            -- putStrLn $ "Chunk : [" ++ (show count) ++ "] Entries parsed = [" ++ (show entryCount) ++ "]"
-            putStrLn $ "Chunk : [" ++ (show count) ++ "] Entries parsed = [" ++ (show 0) ++ "]"
+            entryCount <- primitiveGroups pg st gran 0
+            putStrLn $ "Chunk : [" ++ (show count) ++ "] Entries parsed = [" ++ (show entryCount) ++ "]"
+            -- putStrLn $ "Chunk : [" ++ (show count) ++ "] Entries parsed = [" ++ (show 0) ++ "]"
             processData xs (count + 1)
 
 
       -- Primitive Groups
-      -- primitiveGroups [] _ _ count = return count
-      -- primitiveGroups (x:xs) st gran count = do 
-      --   let pgNodes = getVal x dense
-      --   let pgWays = F.toList $ getVal x ways
+      primitiveGroups [] _ _ count = return count
+      primitiveGroups (x:xs) st gran count = do 
+        let pgNodes = fromJust . getField $ pg_dense x
+        -- print pgNodes
+        -- let pgWays = F.toList $ getVal x ways
       --   let pgRelations = F.toList $ getVal x relations
-      --   let impNodes = denseNodes pgNodes
+        let impNodes = denseNodes pgNodes
+
       --   let impWays = parseImpWays pgWays
       --   let impRelations = parseImpRelations pgRelations
 
-      --   dbNodecommand impNodes
+        dbNodecommand impNodes
       --   dbWaycommand impWays
       --   dbRelationcommand impRelations
 
-      --   let newCount = count + (length impNodes) + (length impWays) + (length impRelations)
-      --   primitiveGroups xs st gran newCount
-      --   where
+        -- let newCount = count + (length impNodes) + (length impWays) + (length impRelations)
+        let newCount = count + (length impNodes)
+        primitiveGroups xs st gran newCount
+        where
+          denseNodes :: DenseNodes -> [N.ImportNode]
+          denseNodes d = do 
+            let ids = map fromIntegral $ getField $ dense_nodes_id d
+            let latitudes = map fromIntegral $ getField $ dense_nodes_lat d
+            let longitudes = map fromIntegral $ getField $ dense_nodes_lon d
+            let keyvals = map fromIntegral $ getField $ dense_nodes_keys_vals d
+
+            let maybeInfo = getField $ dense_nodes_info d
+            case maybeInfo of
+              Just info -> do 
+                let versions = map fromIntegral (getField $ dense_info_version info) 
+                let timestamps = map fromIntegral (getField $ dense_info_timestamp info) 
+                let changesets = map fromIntegral (getField $ dense_info_changeset info) 
+                let uids = map fromIntegral (getField $ dense_info_uid info) 
+                let sids = map fromIntegral (getField $ dense_info_user_sid info) 
+                buildNodeData ids latitudes longitudes keyvals versions timestamps changesets uids sids
+              Nothing -> buildNodeData ids latitudes longitudes keyvals [] [] [] [] []
+
+            -- buildNodeData ids latitudes longitudes keyvals versions timestamps changesets uids sids
+
+          buildNodeData :: [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [N.ImportNode]
+          buildNodeData ids lat lon keyvals versions timestamps changesets uids sids = do
+            let identifiers = deltaDecode ids 0
+            let latitudes = calculateDegrees (deltaDecode lat 0) gran
+            let longitudes = calculateDegrees (deltaDecode lon 0) gran
+            let decodedTimestamps = deltaDecode timestamps 0
+            let decodedChangesets = deltaDecode changesets 0
+            let decodedUIDs = deltaDecode uids 0
+            let decodedUsers = deltaDecode sids 0
+            
+            buildNodes identifiers latitudes longitudes keyvals versions decodedTimestamps decodedChangesets decodedUIDs decodedUsers
+
+          buildNodes :: [Integer] -> [Float] -> [Float] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [N.ImportNode]
+          buildNodes [] [] [] [] [] [] [] [] [] = []
+          buildNodes (id:ids) (lat:lats) (long:longs) keyvals (ver:versions) (ts:timestamps) (cs:changesets) (uid:uids) (sid:sids) = 
+                          N.ImportNodeFull {  N._id=id
+                                            , N.latitude=lat
+                                            , N.longitude=long
+                                            , N.tags=(fst $ lookupMixedKeyVals keyvals)
+                                            , N.version=ver
+                                            , N.timestamp=ts
+                                            , N.changeset=cs
+                                            , N.uid=uid
+                                            , N.sid=(st !! (fromIntegral sid :: Int))
+                                          } : buildNodes ids lats longs (snd $ lookupMixedKeyVals keyvals) versions timestamps changesets uids sids
+          buildNodes (id:ids) (lat:lats) (long:longs) keyvals [] [] [] [] [] =
+                          N.ImportNodeSmall id lat long (fst $ lookupMixedKeyVals keyvals) : buildNodes ids lats longs (snd $ lookupMixedKeyVals keyvals) [] [] [] [] []
+            
+
+          lookupMixedKeyVals :: [Integer] -> ([T.ImportTag], [Integer])
+          lookupMixedKeyVals keyvals= splitKeyVal keyvals []
+            where
+              splitKeyVal :: [Integer] -> [T.ImportTag] -> ([T.ImportTag], [Integer])
+              splitKeyVal [] [] = ([], [])
+              splitKeyVal [] y = (y, [])
+              splitKeyVal (x:xx:xs) y 
+                | x == 0 = (y, (xx : xs))
+                | otherwise = splitKeyVal xs (T.ImportTag (st !! (fromIntegral x :: Int)) (st !! (fromIntegral xx :: Int)) : y)
+              splitKeyVal (x:_) y = (y, []) -- In the case that the array is on an unequal number, Can happen if the last couple of entries are 0
+
+
+          lookupKeyVals :: [Int] -> [Int] -> [T.ImportTag]
+          lookupKeyVals [] [] = []
+          lookupKeyVals (x:xs) (y:ys) = do
+            T.ImportTag (st !! x) (st !! y) : lookupKeyVals xs ys
+
+
+
       --     parseImpRelations :: [Relation] -> [R.ImportRelation]
       --     parseImpRelations [] = []
       --     parseImpRelations (x:xs) = do
@@ -147,65 +219,6 @@ performImport fileName dbNodecommand = do
       --                       , W.user=(st !! (fromIntegral (getVal info OSM.OSMFormat.Info.user_sid) :: Int))
       --                       , W.nodes=deltaRefs}
 
-      --     denseNodes :: DenseNodes -> [N.ImportNode]
-      --     denseNodes d = do 
-      --       let ids = map fromIntegral $ F.toList (getVal d OSM.OSMFormat.DenseNodes.id)
-      --       let latitudes = map fromIntegral $ F.toList (getVal d lat) 
-      --       let longitudes = map fromIntegral $ F.toList (getVal d lon)
-      --       let keyvals = map fromIntegral $ F.toList (getVal d keys_vals)
-      --       let info = getVal d denseinfo
-      --       let versions =  map fromIntegral $ F.toList (getVal info OSM.OSMFormat.DenseInfo.version)
-      --       let timestamps = map fromIntegral $ F.toList (getVal info OSM.OSMFormat.DenseInfo.timestamp) 
-      --       let changesets = map fromIntegral $ F.toList (getVal info OSM.OSMFormat.DenseInfo.changeset)
-      --       let uids = map fromIntegral $ F.toList (getVal info OSM.OSMFormat.DenseInfo.uid)
-      --       let sids = map fromIntegral $ F.toList (getVal info OSM.OSMFormat.DenseInfo.user_sid)
-      --       buildNodeData ids latitudes longitudes keyvals versions timestamps changesets uids sids
-
-      --     buildNodeData :: [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [N.ImportNode]
-      --     buildNodeData ids lat lon keyvals versions timestamps changesets uids sids = do
-      --       let identifiers = deltaDecode ids 0
-      --       let latitudes = calculateDegrees (deltaDecode lat 0) gran
-      --       let longitudes = calculateDegrees (deltaDecode lon 0) gran
-      --       let decodedTimestamps = deltaDecode timestamps 0
-      --       let decodedChangesets = deltaDecode changesets 0
-      --       let decodedUIDs = deltaDecode uids 0
-      --       let decodedUsers = deltaDecode sids 0
-            
-      --       buildNodes identifiers latitudes longitudes keyvals versions decodedTimestamps decodedChangesets decodedUIDs decodedUsers
-
-      --     buildNodes :: [Integer] -> [Float] -> [Float] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [Integer] -> [N.ImportNode]
-      --     buildNodes [] [] [] [] [] [] [] [] [] = []
-      --     buildNodes (id:ids) (lat:lats) (long:longs) keyvals (ver:versions) (ts:timestamps) (cs:changesets) (uid:uids) (sid:sids) = 
-      --                     N.ImportNodeFull {  N._id=id
-      --                                       , N.latitude=lat
-      --                                       , N.longitude=long
-      --                                       , N.tags=(fst $ lookupMixedKeyVals keyvals)
-      --                                       , N.version=ver
-      --                                       , N.timestamp=ts
-      --                                       , N.changeset=cs
-      --                                       , N.uid=uid
-      --                                       , N.sid=(st !! (fromIntegral sid :: Int))
-      --                                     } : buildNodes ids lats longs (snd $ lookupMixedKeyVals keyvals) versions timestamps changesets uids sids
-      --     buildNodes (id:ids) (lat:lats) (long:longs) keyvals [] [] [] [] [] =
-      --                     N.ImportNodeSmall id lat long (fst $ lookupMixedKeyVals keyvals) : buildNodes ids lats longs (snd $ lookupMixedKeyVals keyvals) [] [] [] [] []
-            
-
-      --     lookupMixedKeyVals :: [Integer] -> ([ImportTag], [Integer])
-      --     lookupMixedKeyVals keyvals= splitKeyVal keyvals []
-      --       where
-      --         splitKeyVal :: [Integer] -> [ImportTag] -> ([ImportTag], [Integer])
-      --         splitKeyVal [] [] = ([], [])
-      --         splitKeyVal [] y = (y, [])
-      --         splitKeyVal (x:xx:xs) y 
-      --           | x == 0 = (y, (xx : xs))
-      --           | otherwise = splitKeyVal xs (ImportTag (st !! (fromIntegral x :: Int)) (st !! (fromIntegral xx :: Int)) : y)
-      --         splitKeyVal (x:_) y = (y, []) -- In the case that the array is on an unequal number, Can happen if the last couple of entries are 0
-
-
-      --     lookupKeyVals :: [Int] -> [Int] -> [ImportTag]
-      --     lookupKeyVals [] [] = []
-      --     lookupKeyVals (x:xs) (y:ys) = do
-      --       ImportTag (st !! x) (st !! y) : lookupKeyVals xs ys
 
 showUsage :: IO ()
 showUsage = do
